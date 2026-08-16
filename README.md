@@ -1,9 +1,9 @@
 # qq-relay integration
 
-qq-relay owns its public source, checks, releases, and implementation at <https://github.com/hypermemetic-ai/qq-relay>. qq consumes the stable `refs/heads/main` contract through the source relation in `upstream.env`; qq does not vendor or pin qq-relay source.
+qq-relay owns its public source, checks, installation, and service lifecycle at <https://github.com/hypermemetic-ai/qq-relay>. qq records only the stable `refs/heads/main` source relation in `upstream.env`; it does not vendor or pin qq-relay source and stores no product commit, tag, version, or capability floor.
 
-`bin/qq-relay` executes `bin/qq-relay` from the configured landed repository. Node consumers import `bin/lib/qq-relay-client.mjs`, which loads that repository's `client.mjs`. Both resolvers fail clearly when the linked source is absent and accept `QQ_RELAY_SOURCE=/absolute/checkout` for isolated tests. They do not search `PATH` or arbitrary sibling directories.
+Runtime uses only the product-owned installed artifact. `bin/qq-relay` executes `${QQ_RELAY_INSTALL_ROOT:-$HOME/.local/lib/qq/relay}/bin/qq-relay`, and Node consumers import `bin/lib/qq-relay-client.mjs`, which loads `client.mjs` from that same root. `QQ_RELAY_INSTALL_ROOT`, when set, must be an explicit absolute path. Both resolvers fail closed when the installed surface is absent. They never execute or import from the landed source relation, search `PATH`, fetch, or install at runtime.
 
-`tests/test-qq-relay.sh` clones the configured landed repository when available, otherwise fetches the configured upstream branch, detaches at its current tip, and exercises the launcher, client exports, and live messaging against that isolated checkout.
+The landed repository is for product work and semantic contract evidence. `tests/test-qq-relay.sh` fetches the configured upstream branch tip, checks its public contract, runs qq-relay's installer into a private temporary root, removes the source checkout, and exercises qq's launcher, client loader, agent messaging, and run outcomes against only that installed artifact. The tests do not read installed provenance and do not access the operator's install root or user-service manager.
 
-To upgrade, validate the desired upstream `main` tip in qq-relay, land it there, then run `npm test` in qq. qq records the branch relation, not a product commit, tag, version, or capability floor.
+Follow qq-relay's public README for check, install, activation, and upgrade/restart operations. qq does not own those commands or service transitions. After an upstream change lands, qq validates required behavior semantically against the configured branch rather than using commit ancestry.
