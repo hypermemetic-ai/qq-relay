@@ -1,0 +1,19 @@
+{
+  "name": "@hypermemetic-ai/qq-relay",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "In-process session messaging plugin for the qq DSH host. One repository, one plugin, one version; the mailbox runs inside the host process.",
+  "main": "src/plugin.mjs",
+  "exports": {
+    ".": "./src/plugin.mjs",
+    "./relay": "./src/relay.mjs",
+    "./alias": "./src/alias.mjs",
+    "./labels": "./src/labels.mjs",
+    "./tools": "./src/tools.mjs"
+  },
+  "files": [
+    "src/",
+    "README.md"
+  ]
+}
