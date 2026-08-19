@@ -8,7 +8,6 @@
   "exports": {
     ".": "./src/plugin.mjs",
     "./relay": "./src/relay.mjs",
-    "./alias": "./src/alias.mjs",
     "./labels": "./src/labels.mjs",
     "./tools": "./src/tools.mjs"
   },

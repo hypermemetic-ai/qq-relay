@@ -18,23 +18,26 @@ transcript card for "I sent this".
 
 ### Address is the DSH session id plus a spoken alias
 
-The real id is DSH's `session-<UUID>` and always works. qq also owns a short
-public alias so a hand could point at a session to a screen. Same map serves
-the relay list and the phone switcher.
+The real id is DSH's `session-<UUID>` and always works. qq owns the short
+public alias so a hand could point at a session to a screen. Relay consumes
+that book through `ctx.get("qq", false)` / `ctx.get("qq-aliases", false)`.
+It does not keep a second map, does not persist aliases, and does not
+npm-depend on `@hypermemetic-ai/qq`. Missing qq means no aliases on the
+mailbox; send still works by session id.
 
-Locked deck, issued farthest-first among free names (live aliases spread out),
-never re-dealt while a session lives, no midnight reset, no re-deal on restart:
+Locked deck (owned by qq, not this plugin), issued farthest-first among free
+names (live aliases spread out), never re-dealt while a session lives, no
+midnight reset, no re-deal on restart:
 
 - Published: `1 2 3 4 9 10 12 20 40 80`
 - Strange overflow, only these: `6 7 8 11 30` (checked against the live spoken
-  set; 30 is not dealt while 3 is live)
+  set)
 - Past that: integers above 100, still spoken-distinct from live aliases and
   never a neighbor of one. Pronunciation convenience stops being a goal.
 
 Warmth: the last few issued aliases stay warm after their session leaves so a
-returning number feels fresh. The map lives at a dotfile beside `DSH_HOME`
-(`.qq-relay-aliases.json`); set `aliasFile` in plugin config to override. The
-file is `0600`, written atomically.
+returning number feels fresh. The map lives on qq at a dotfile beside
+`DSH_HOME` (`.qq-aliases.json`).
 
 ### Send modes, two only
 
@@ -117,6 +120,7 @@ product for DSH.
 node tests/test-qq-relay-plugin.mjs .
 ```
 
-Covers alias dealing (farthest-first, warmth, overflow, restart persistence),
-live-only addressing, steer/urgent delivery, sender receipts, refusals, labels
-hang/clear/purge, and tool registration.
+Covers live-only addressing against the qq book (or no aliases when qq is
+absent), steer/urgent delivery, sender receipts, refusals, labels
+hang/clear/purge, and tool registration. Alias dealing lives in
+`node tests/test-qq-alias.mjs`.

@@ -15,7 +15,6 @@
 
 import { randomUUID } from "node:crypto";
 
-import { createAliasBook, defaultAliasFile } from "./alias.mjs";
 import { createLabelBoard } from "./labels.mjs";
 
 const SESSION_ID = /^session-[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -55,17 +54,36 @@ export function createRelayService(ctx, config = {}) {
   }
   const sessions = ctx.get("sessions", false);
 
-  const book = createAliasBook(defaultAliasFile(process.env, config), {
-    now: config.now,
-    rng: config.rng,
-  });
   const labels = createLabelBoard({
     isLive: (sessionId) => agents.get(sessionId) !== undefined,
   });
   const ledger = [];
 
-  function syncAliases() {
-    book.sync(liveAgents().map((agent) => agent.session.id));
+  // Lazy so plugin ordering cannot starve the book: relay consumes qq's
+  // aliases, it does not own them.
+  function aliases() {
+    return ctx.get("qq", false) ?? ctx.get("qq-aliases", false);
+  }
+
+  function aliasFor(sessionId) {
+    const provider = aliases();
+    if (!provider) return undefined;
+    if (typeof provider.alias === "function") return provider.alias(sessionId);
+    if (typeof provider.aliasFor === "function") return provider.aliasFor(sessionId);
+    return undefined;
+  }
+
+  function resolveAddress(address) {
+    const provider = aliases();
+    if (typeof provider?.resolve === "function") {
+      const resolved = provider.resolve(address);
+      if (resolved) return resolved;
+    }
+    return liveAgents().find((agent) =>
+      agent.session.id === address || aliasFor(agent.session.id) === address)?.session.id;
+  }
+
+  function pruneLabels() {
     labels.pruneLive();
   }
 
@@ -108,20 +126,20 @@ export function createRelayService(ctx, config = {}) {
     if (message.length > MAX_MESSAGE_LENGTH) {
       throw new RelayError(`message exceeds ${MAX_MESSAGE_LENGTH} characters`);
     }
-    syncAliases();
+    pruneLabels();
     const sender = agents.get(fromId);
     if (!sender) throw new RelayError("send requires a live session-<UUID> sender");
 
-    const recipients = liveAgents();
-    const exact = recipients.find((agent) => agent.session.id === to);
-    const byAlias = recipients.find((agent) => book.aliasFor(agent.session.id) === to);
-    const recipient = exact ?? byAlias;
-    if (!recipient) throw new RelayError(`no live session matches ${JSON.stringify(to)}`);
+    const recipientId = resolveAddress(to);
+    const recipient = recipientId ? agents.get(recipientId) : undefined;
+    if (!recipient || !SESSION_ID.test(recipient.session?.id)) {
+      throw new RelayError(`no live session matches ${JSON.stringify(to)}`);
+    }
     if (recipient.session.id === fromId) {
       throw new RelayError("send cannot address the sender's own session");
     }
 
-    const fromAlias = book.aliasFor(fromId);
+    const fromAlias = aliasFor(fromId);
     const fromLine = `From session ${fromAlias ?? fromId} (${fromId}):\n\n`;
     const envelope = relayEnvelope({ fromId, fromAlias, text: fromLine + message });
 
@@ -130,7 +148,7 @@ export function createRelayService(ctx, config = {}) {
     ledger.push({
       message_id: envelope.id,
       to: recipient.session.id,
-      to_alias: book.aliasFor(recipient.session.id),
+      to_alias: aliasFor(recipient.session.id),
       delivery,
       from: fromId,
       content: message,
@@ -142,7 +160,7 @@ export function createRelayService(ctx, config = {}) {
       status: "sent",
       message_id: envelope.id,
       to: recipient.session.id,
-      to_alias: book.aliasFor(recipient.session.id),
+      to_alias: aliasFor(recipient.session.id),
       delivery,
     };
   }
@@ -158,14 +176,14 @@ export function createRelayService(ctx, config = {}) {
 
   /** Live directory rows: alias, one status phrase, labels bag. */
   function list({ filter } = {}) {
-    syncAliases();
+    pruneLabels();
     const rows = liveAgents()
       .filter((agent) => {
         const bag = labels.labelsFor(agent.session.id);
         return labels.matches(bag, filter);
       })
       .map((agent) => ({
-        alias: book.aliasFor(agent.session.id) ?? "",
+        alias: aliasFor(agent.session.id) ?? "",
         session: agent.session.id,
         status: agent.status === "idle" ? "idle" : "thinking-or-tool",
         labels: labels.labelsFor(agent.session.id),
@@ -185,24 +203,23 @@ export function createRelayService(ctx, config = {}) {
     status,
     list,
     alias: (sessionId) => {
-      syncAliases();
-      return book.aliasFor(sessionId);
+      pruneLabels();
+      return aliasFor(sessionId);
     },
     resolve: (address) => {
-      syncAliases();
-      return liveAgents().find((agent) =>
-        agent.session.id === address || book.aliasFor(agent.session.id) === address)?.session.id;
+      pruneLabels();
+      return resolveAddress(address);
     },
     hang: (sessionId, label) => {
-      syncAliases();
+      pruneLabels();
       labels.hang(sessionId, label);
     },
     clear: (sessionId, label) => {
-      syncAliases();
+      pruneLabels();
       labels.clear(sessionId, label);
     },
     release: (sessionId) => labels.release(sessionId),
     labelsFor: (sessionId) => labels.labelsFor(sessionId),
-    dispose: () => book.close(),
+    dispose: () => {},
   });
 }
