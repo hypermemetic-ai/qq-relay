@@ -16,9 +16,10 @@ export function apply(ctx, config = {}) {
   const service = createRelayService(ctx, config);
   ctx.provide("qq-relay", service);
 
-  const tools = ctx.get("tools", false);
-  if (tools && typeof tools.register === "function") {
-    ctx.effect(
+  const registerTools = (toolCtx) => {
+    const tools = toolCtx?.get?.("tools", false) ?? ctx.get("tools", false);
+    if (!tools || typeof tools.register !== "function") return;
+    return toolCtx.effect(
       () => {
         const disposers = buildRelayTools(service).map((tool) => tools.register(tool));
         return () => {
@@ -27,5 +28,7 @@ export function apply(ctx, config = {}) {
       },
       "qq-relay: tools",
     );
-  }
+  };
+  if (typeof ctx.inject === "function") ctx.inject(["tools"], registerTools);
+  else registerTools(ctx);
 }
