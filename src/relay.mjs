@@ -145,10 +145,11 @@ export function createRelayService(ctx, config = {}) {
 
     await deliver(recipient, envelope, delivery);
 
+    const toAlias = aliasFor(recipient.session.id) ?? "";
     ledger.push({
       message_id: envelope.id,
       to: recipient.session.id,
-      to_alias: aliasFor(recipient.session.id),
+      to_alias: toAlias,
       delivery,
       from: fromId,
       content: message,
@@ -156,11 +157,12 @@ export function createRelayService(ctx, config = {}) {
     });
     if (ledger.length > LEDGER_CAP) ledger.splice(0, ledger.length - LEDGER_CAP);
 
+    // DSH snapshots tool results; undefined fields are not lossless JSON.
     return {
       status: "sent",
       message_id: envelope.id,
       to: recipient.session.id,
-      to_alias: aliasFor(recipient.session.id),
+      to_alias: toAlias,
       delivery,
     };
   }
@@ -171,7 +173,13 @@ export function createRelayService(ctx, config = {}) {
     }
     const record = ledger.find((entry) => entry.message_id === messageId);
     if (!record) throw new RelayError("message_id not found");
-    return { status: "sent", ...record };
+    return {
+      status: "sent",
+      message_id: record.message_id,
+      to: record.to,
+      to_alias: record.to_alias ?? "",
+      delivery: record.delivery,
+    };
   }
 
   /** Live directory rows: alias, one status phrase, labels bag. */

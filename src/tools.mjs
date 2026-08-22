@@ -104,8 +104,9 @@ export function buildRelayTools(relay) {
         },
         render: (_args, value) => {
           if (value.status === "refused") return [textBlock(`Relay refused: ${value.reason}`)];
+          const dest = value.to_alias ? `${value.to_alias} (${value.to})` : value.to;
           return [textBlock(
-            `message sent to ${value.to_alias} (${value.to}) via ${value.delivery}: ${value.message_id}`,
+            `message sent to ${dest} via ${value.delivery}: ${value.message_id}`,
           )];
         },
       },
