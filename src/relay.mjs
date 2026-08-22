@@ -140,7 +140,7 @@ export function createRelayService(ctx, config = {}) {
     }
 
     const fromAlias = aliasFor(fromId);
-    const fromLine = `From session ${fromAlias ?? fromId} (${fromId}):\n\n`;
+    const fromLine = `From session ${fromAlias || fromId}:\n\n`;
     const envelope = relayEnvelope({ fromId, fromAlias, text: fromLine + message });
 
     await deliver(recipient, envelope, delivery);
