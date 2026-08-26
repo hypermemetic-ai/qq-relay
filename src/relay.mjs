@@ -135,6 +135,9 @@ export function createRelayService(ctx, config = {}) {
     if (!recipient || !SESSION_ID.test(recipient.session?.id)) {
       throw new RelayError(`no live session matches ${JSON.stringify(to)}`);
     }
+    if (aliasFor(recipient.session.id) === "projects") {
+      throw new RelayError("projects session is operator-controlled and does not receive relay messages");
+    }
     if (recipient.session.id === fromId) {
       throw new RelayError("send cannot address the sender's own session");
     }
@@ -187,6 +190,7 @@ export function createRelayService(ctx, config = {}) {
     pruneLabels();
     const rows = liveAgents()
       .filter((agent) => {
+        if (aliasFor(agent.session.id) === "projects") return false;
         const bag = labels.labelsFor(agent.session.id);
         return labels.matches(bag, filter);
       })
