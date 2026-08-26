@@ -16,14 +16,18 @@ the sessions loaded in this host. Anyone loaded may send; there is no role
 gate. A send is accepted or refused in the tool result — the sender gets no
 transcript card for "I sent this".
 
-### Address is the DSH session id plus a spoken alias
+### Stable address is the DSH session UUID; aliases are display shorthand
 
-The real id is DSH's `session-<UUID>` and always works. qq owns the short
-public alias so a hand could point at a session to a screen. Relay consumes
-that book through `ctx.get("qq", false)` / `ctx.get("qq-aliases", false)`.
-It does not keep a second map, does not persist aliases, and does not
-npm-depend on `@hypermemetic-ai/qq`. Missing qq means no aliases on the
-mailbox; send still works by session id.
+The durable live identity is DSH's full `session-<UUID>`. Model-facing tools
+require that UUID from `relay_list`; an alias is never accepted as
+`relay_send.to` because aliases can be reassigned after a session leaves. qq
+owns the short public alias only so a human can point at a session on a screen.
+Relay consumes that book through `ctx.get("qq", false)` /
+`ctx.get("qq-aliases", false)`. The service API continues to resolve a current
+alias for compatibility with internal/human callers, but stale UUIDs always
+refuse and never follow an alias to its new holder. Relay does not keep a
+second map, persist aliases, or npm-depend on `@hypermemetic-ai/qq`. Missing qq
+means no display aliases; send still works by session UUID.
 
 Locked deck (owned by qq, not this plugin), issued farthest-first among free
 names (live aliases spread out), never re-dealt while a session lives, no
@@ -53,18 +57,21 @@ Both wake the recipient. `inject` is not a send mode.
 
 Inbound mail is a DSH user-role message with the plugin source mark
 (`{ kind: "plugin", plugin: "qq-relay", form: "relay" }`) plus a short
-from-line (`From session <alias> (<id>):`), so the model never reads it as
-the operator typing.
+from-line (`From session <session-UUID> (alias <alias>, ephemeral):`), so the
+model sees durable sender identity and never reads it as the operator typing.
 
 ### Directory rows
 
-`relay_list` returns, per live session: alias, one status phrase
-(`idle` / `thinking-or-tool`), labels, and the canonical session id as a check.
+`relay_list` returns and visibly renders, per live session: the canonical full
+session UUID, an explicitly ephemeral alias, one status phrase (`idle` /
+`thinking-or-tool`), and labels. The UUID is the handle; labels and aliases are
+metadata, never identity.
 
 ### Labels: relay is the bulletin board, workflows write the sticky notes
 
 A live session carries a small bag of namespaced tokens, e.g. `tasks:T-66`,
-`workflows:delegate`. Relay displays and filters them (`tasks:T-66` exact, or
+`workflows:land-run/land-54ded5f5`, or `workflows:land-role/qa-look-1`.
+Relay displays and filters them (`tasks:T-66` exact, or
 `tasks` for a namespace prefix); it does not interpret them. Other plugins hang
 and clear labels through the public `qq-relay` service:
 
@@ -82,8 +89,8 @@ When the DSH host exposes `ctx.tools`, the plugin registers three tools:
 
 | Tool | Purpose |
 |---|---|
-| `relay_list` | Live sessions with alias, status phrase, labels, session id; optional label filter. |
-| `relay_send` | Send to an alias or session id with `default` or `urgent` delivery. |
+| `relay_list` | Live sessions with stable UUID, ephemeral alias, status phrase, labels; optional label filter. |
+| `relay_send` | Send to the full live session UUID from `relay_list` with `default` or `urgent` delivery; aliases are rejected. |
 | `relay_status` | Inspect the in-process delivery record for a `message_id`. |
 
 The v1 mailbox is in-process, so a sent message is already routed into the

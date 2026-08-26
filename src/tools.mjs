@@ -3,6 +3,8 @@
 // The sender receipt is the tool result; refusals come back as text with
 // details.status "refused" rather than throwing through the agent loop.
 
+const SESSION_ID = /^session-[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
 function textBlock(text) {
   return { type: "text", text };
 }
@@ -18,7 +20,7 @@ export function buildRelayTools(relay) {
   return [
     {
       name: "relay_list",
-      description: "List live sessions in this DSH host that can receive relay messages. Each row shows the session's short alias, one status phrase (idle or thinking-or-tool), and any labels other plugins hung on it. Filter by an exact namespaced label (tasks:T-66) or a namespace prefix (tasks). The alias is the handle. Relayed messages wake busy sessions; prefer to send only when something is actionable.",
+      description: "List live sessions in this DSH host that can receive relay messages. Each row visibly shows the stable session UUID, ephemeral display alias, one status phrase (idle or thinking-or-tool), and any labels other plugins hung on it. Filter by an exact namespaced label (tasks:T-66) or a namespace prefix (tasks). The full session UUID is the only safe relay_send handle; aliases are informational and can be reassigned. Relayed messages wake busy sessions; prefer to send only when something is actionable.",
       parameters: {
         filter: {
           type: "string",
@@ -54,7 +56,8 @@ export function buildRelayTools(relay) {
             const labelsLine = Array.isArray(row.labels) && row.labels.length > 0
               ? `  ${row.labels.join(" ")}`
               : "";
-            return `${row.alias || row.session}  ${row.status}${labelsLine}`;
+            const alias = row.alias ? `alias ${row.alias} (ephemeral)` : "alias —";
+            return `session ${row.session}  ${alias}  ${row.status}${labelsLine}`;
           });
           const text = `live sessions:\n${lines.join("\n")}`;
           return [textBlock(text)];
@@ -71,12 +74,13 @@ export function buildRelayTools(relay) {
     },
     {
       name: "relay_send",
-      description: "Send one message to another live session in this DSH host. to is the alias from relay_list. default delivery steers the recipient: the message lands at their next tool/step boundary and wakes them if idle. urgent delivery halts their current turn, then starts a fresh turn with this message. Use urgent only for high-urgency interrupts. The recipient cannot opt out during their core run; sending wakes them. Your receipt is this tool's result, not a special transcript card. Cannot address the sender's own session.",
+      description: "Send one message to another live session in this DSH host. to must be the full stable session UUID from relay_list; aliases are display-only and are rejected because they can be reassigned. default delivery steers the recipient: the message lands at their next tool/step boundary and wakes them if idle. urgent delivery halts their current turn, then starts a fresh turn with this message. Use urgent only for high-urgency interrupts. The recipient cannot opt out during their core run; sending wakes them. Your receipt is this tool's result, not a special transcript card. Cannot address the sender's own session.",
       parameters: {
         to: {
           type: "string",
           required: true,
-          description: "Recipient alias from relay_list.",
+          pattern: "^session-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$",
+          description: "Recipient full stable session UUID from relay_list. Aliases are not accepted.",
         },
         message: {
           type: "string",
@@ -104,15 +108,18 @@ export function buildRelayTools(relay) {
         },
         render: (_args, value) => {
           if (value.status === "refused") return [textBlock(`Relay refused: ${value.reason}`)];
-          const dest = value.to_alias || value.to;
+          const alias = value.to_alias ? ` (alias ${value.to_alias}, ephemeral)` : "";
           return [textBlock(
-            `message sent to ${dest} via ${value.delivery}: ${value.message_id}`,
+            `message sent to session ${value.to}${alias} via ${value.delivery}: ${value.message_id}`,
           )];
         },
       },
       async execute(args, exec) {
         try {
           const fromId = exec?.agent?.session?.id;
+          if (!SESSION_ID.test(args?.to ?? "")) {
+            return refusal("relay_send requires the full stable session UUID from relay_list; aliases are ephemeral and not accepted");
+          }
           const result = await relay.send({
             fromId,
             to: args.to,
@@ -149,7 +156,8 @@ export function buildRelayTools(relay) {
         },
         render: (_args, value) => {
           if (value.status === "refused") return [textBlock(`Relay refused: ${value.reason}`)];
-          return [textBlock(`relay message ${value.message_id} to ${value.to_alias || value.to} is sent`)];
+          const alias = value.to_alias ? ` (alias ${value.to_alias} at send time, ephemeral)` : "";
+          return [textBlock(`relay message ${value.message_id} to session ${value.to}${alias} is sent`)];
         },
       },
       async execute(args) {
