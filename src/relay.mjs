@@ -18,6 +18,7 @@ import { randomUUID } from "node:crypto";
 import { createLabelBoard } from "./labels.mjs";
 
 const SESSION_ID = /^session-[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const MESSAGE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const MAX_MESSAGE_LENGTH = 65_536;
 const DELIVERIES = new Set(["default", "urgent"]);
 const LEDGER_CAP = 256;
@@ -33,9 +34,10 @@ function freezeDeep(value) {
 }
 
 /** One DSH user-role message marked as plugin-originated agent mail. */
-export function relayEnvelope({ fromId, fromAlias, text }) {
+export function relayEnvelope({ fromId, fromAlias, text, messageId = randomUUID() }) {
+  if (!MESSAGE_ID.test(messageId)) throw new RelayError("messageId must be a UUID");
   return freezeDeep({
-    id: randomUUID(),
+    id: messageId,
     role: "user",
     content: [{ type: "text", text }],
     source: { kind: "plugin", plugin: "qq-relay", form: "relay" },
@@ -100,8 +102,20 @@ export function createRelayService(ctx, config = {}) {
     }
   }
 
+  function alreadyInserted(recipient, messageId) {
+    const pending = [
+      ...(recipient.inbox?.nextTurn ?? []),
+      ...(recipient.inbox?.nextStep ?? []),
+    ];
+    if (pending.some((message) => message?.id === messageId)) return true;
+    return (recipient.session?.events ?? []).some((event) =>
+      event?.type === "user/message"
+      && (event.data?.id === messageId || event.data?.message?.id === messageId));
+  }
+
   /** Route one validated envelope into a live recipient's inbox. */
   async function deliver(recipient, envelope, delivery) {
+    if (alreadyInserted(recipient, envelope.id)) return false;
     if (delivery === "urgent") {
       if (recipient.status !== "idle") {
         recipient.cancel({ kind: "hook", reason: "qq-relay urgent message" });
@@ -111,9 +125,10 @@ export function createRelayService(ctx, config = {}) {
       recipient.steer(envelope);
     }
     await flushAck(recipient);
+    return true;
   }
 
-  async function send({ fromId, to, message, delivery = "default" }) {
+  async function send({ fromId, to, message, delivery = "default", messageId }) {
     if (!SESSION_ID.test(fromId)) {
       throw new RelayError("send requires a live session-<UUID> sender");
     }
@@ -125,6 +140,9 @@ export function createRelayService(ctx, config = {}) {
     }
     if (message.length > MAX_MESSAGE_LENGTH) {
       throw new RelayError(`message exceeds ${MAX_MESSAGE_LENGTH} characters`);
+    }
+    if (messageId !== undefined && !MESSAGE_ID.test(messageId)) {
+      throw new RelayError("messageId must be a UUID");
     }
     pruneLabels();
     const sender = agents.get(fromId);
@@ -144,21 +162,27 @@ export function createRelayService(ctx, config = {}) {
 
     const fromAlias = aliasFor(fromId);
     const fromLine = `From session ${fromId}${fromAlias ? ` (alias ${fromAlias}, ephemeral)` : ""}:\n\n`;
-    const envelope = relayEnvelope({ fromId, fromAlias, text: fromLine + message });
+    const envelope = relayEnvelope({ fromId, fromAlias, text: fromLine + message, messageId });
+    const recorded = ledger.find((entry) => entry.message_id === envelope.id);
+    if (recorded && (recorded.to !== recipient.session.id || recorded.from !== fromId || recorded.content !== message)) {
+      throw new RelayError("messageId was already used for a different relay envelope");
+    }
 
     await deliver(recipient, envelope, delivery);
 
     const toAlias = aliasFor(recipient.session.id) ?? "";
-    ledger.push({
-      message_id: envelope.id,
-      to: recipient.session.id,
-      to_alias: toAlias,
-      delivery,
-      from: fromId,
-      content: message,
-      at: config.now?.() ?? Date.now(),
-    });
-    if (ledger.length > LEDGER_CAP) ledger.splice(0, ledger.length - LEDGER_CAP);
+    if (!recorded) {
+      ledger.push({
+        message_id: envelope.id,
+        to: recipient.session.id,
+        to_alias: toAlias,
+        delivery,
+        from: fromId,
+        content: message,
+        at: config.now?.() ?? Date.now(),
+      });
+      if (ledger.length > LEDGER_CAP) ledger.splice(0, ledger.length - LEDGER_CAP);
+    }
 
     // DSH snapshots tool results; undefined fields are not lossless JSON.
     return {
