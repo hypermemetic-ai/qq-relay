@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "In-process session messaging plugin for the qq DSH host. One repository, one plugin, one version; the mailbox runs inside the host process.",
+  "description": "In-process Cordis session mailbox for the core DSH host.",
   "main": "src/plugin.mjs",
   "exports": {
     ".": "./src/plugin.mjs",
