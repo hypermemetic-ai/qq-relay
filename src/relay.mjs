@@ -33,6 +33,37 @@ function freezeDeep(value) {
   return value;
 }
 
+// Kept local so relay does not depend on qq-core's agent catalog.
+function formatIdleFor(ms) {
+  if (!Number.isFinite(ms) || ms < 0) return "";
+  const sec = Math.floor(ms / 1000);
+  if (sec < 60) return `${sec}s`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m`;
+  const hr = Math.floor(min / 60);
+  if (hr < 48) return `${hr}h`;
+  return `${Math.floor(hr / 24)}d`;
+}
+
+function lastSessionEventTime(session) {
+  let latest;
+  for (const event of Array.isArray(session?.events) ? session.events : []) {
+    const time = event?.time;
+    const value = typeof time === "number" ? time : Date.parse(time ?? "");
+    if (Number.isFinite(value) && (latest === undefined || value > latest)) latest = value;
+  }
+  return latest;
+}
+
+function idleFor(agent, now) {
+  if (agent?.status !== "idle") return "";
+  const createdAt = agent?.session?.header?.createdAt;
+  const since = lastSessionEventTime(agent?.session)
+    ?? (Number.isFinite(createdAt) ? createdAt : undefined);
+  if (!Number.isFinite(since)) return "";
+  return formatIdleFor(Math.max(0, now - since));
+}
+
 function escapeAttribute(value) {
   return String(value)
     .replaceAll("&", "&amp;")
@@ -251,9 +282,10 @@ export function createRelayService(ctx, config = {}) {
     };
   }
 
-  /** Live directory rows: alias, one status phrase, labels bag. */
-  function list({ filter } = {}) {
+  /** Live directory rows: identity, occupancy, workspace, and labels bag. */
+  function list({ filter, fromId } = {}) {
     pruneLabels();
+    const now = config.now?.() ?? Date.now();
     const rows = liveAgents()
       .filter((agent) => {
         if (aliasFor(agent.session.id) === "projects") return false;
@@ -265,6 +297,9 @@ export function createRelayService(ctx, config = {}) {
         session: agent.session.id,
         status: agent.status === "idle" ? "idle" : "thinking-or-tool",
         labels: labels.labelsFor(agent.session.id),
+        cwd: typeof agent.session?.header?.cwd === "string" ? agent.session.header.cwd : "",
+        self: agent.session.id === fromId,
+        idle_for: idleFor(agent, now),
       }))
       .sort((left, right) => {
         const leftNumber = Number(left.alias);
