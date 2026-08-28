@@ -20,7 +20,7 @@ export function buildRelayTools(relay) {
   return [
     {
       name: "relay_list",
-      description: "List live sessions in this DSH host that can receive relay messages. Each row visibly shows the stable session UUID, ephemeral display alias, one status phrase (idle or thinking-or-tool), and any labels other plugins hung on it. Filter by an exact namespaced label (tasks:T-66) or a namespace prefix (tasks). The full session UUID is the only safe relay_send handle; aliases are informational and can be reassigned. Relayed messages wake busy sessions; prefer to send only when something is actionable.",
+      description: "List live sessions in this DSH host that can receive relay messages. Each row shows the stable session UUID (the relay_send handle), alias (the operator handle, never a send handle), cwd, self, status (idle or thinking-or-tool), idle_for, and any opaque labels other plugins hung on it. self marks the listing caller; idle_for is empty for non-idle sessions. Filter by an exact namespaced label (tasks:T-66) or a namespace prefix (tasks). Relayed messages wake busy sessions; prefer to send only when something is actionable.",
       parameters: {
         filter: {
           type: "string",
@@ -43,6 +43,9 @@ export function buildRelayTools(relay) {
                   session: { type: "string" },
                   status: { type: "string" },
                   labels: { type: "array", items: { type: "string" } },
+                  cwd: { type: "string" },
+                  self: { type: "boolean" },
+                  idle_for: { type: "string" },
                 },
               },
             },
@@ -53,19 +56,26 @@ export function buildRelayTools(relay) {
           const rows = Array.isArray(value.rows) ? value.rows : [];
           if (rows.length === 0) return [textBlock("No live sessions match.")];
           const lines = rows.map((row) => {
-            const labelsLine = Array.isArray(row.labels) && row.labels.length > 0
-              ? `  ${row.labels.join(" ")}`
-              : "";
-            const alias = row.alias ? `alias ${row.alias} (ephemeral)` : "alias —";
-            return `session ${row.session}  ${alias}  ${row.status}${labelsLine}`;
+            const fields = [
+              row.session,
+              row.alias ? `alias ${row.alias}` : "alias —",
+              `${row.status}${row.idle_for ? ` ${row.idle_for}` : ""}`,
+            ];
+            fields.push(row.cwd ? row.cwd : "cwd —");
+            if (row.self === true) fields.push("self");
+            if (Array.isArray(row.labels) && row.labels.length > 0) {
+              fields.push(row.labels.join(" "));
+            }
+            return fields.join("  ");
           });
           const text = `live sessions:\n${lines.join("\n")}`;
           return [textBlock(text)];
         },
       },
-      async execute(args) {
+      async execute(args, exec) {
         try {
-          const rows = relay.list({ filter: args.filter });
+          const fromId = exec?.agent?.session?.id;
+          const rows = relay.list({ filter: args?.filter, fromId });
           return { status: "ok", rows };
         } catch (error) {
           return refusal(error instanceof Error ? error.message : String(error));

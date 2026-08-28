@@ -8,7 +8,12 @@ const FROM_ID = "session-11111111-1111-4111-8111-111111111111";
 const TO_ID = "session-22222222-2222-4222-8222-222222222222";
 const MAX_MESSAGE_LENGTH = 65_536;
 
-function fakeAgent(id, { status = "idle" } = {}) {
+function fakeAgent(id, {
+  status = "idle",
+  cwd,
+  createdAt,
+  events = [],
+} = {}) {
   const calls = {
     cancel: [],
     followup: [],
@@ -17,7 +22,14 @@ function fakeAgent(id, { status = "idle" } = {}) {
   return {
     calls,
     inbox: { nextStep: [], nextTurn: [] },
-    session: { id, events: [] },
+    session: {
+      id,
+      events,
+      header: {
+        ...(cwd !== undefined ? { cwd } : {}),
+        ...(createdAt !== undefined ? { createdAt } : {}),
+      },
+    },
     status,
     cancel(reason) {
       calls.cancel.push(reason);
@@ -31,9 +43,15 @@ function fakeAgent(id, { status = "idle" } = {}) {
   };
 }
 
-function fixture({ aliases, recipientStatus = "idle" } = {}) {
-  const sender = fakeAgent(FROM_ID);
-  const recipient = fakeAgent(TO_ID, { status: recipientStatus });
+function fixture({
+  aliases,
+  now,
+  recipientOptions = {},
+  recipientStatus = "idle",
+  senderOptions = {},
+} = {}) {
+  const sender = fakeAgent(FROM_ID, senderOptions);
+  const recipient = fakeAgent(TO_ID, { status: recipientStatus, ...recipientOptions });
   const live = new Map([
     [FROM_ID, sender],
     [TO_ID, recipient],
@@ -56,7 +74,7 @@ function fixture({ aliases, recipientStatus = "idle" } = {}) {
   };
   return {
     recipient,
-    relay: createRelayService(ctx),
+    relay: createRelayService(ctx, now === undefined ? {} : { now: () => now }),
     sender,
   };
 }
@@ -182,4 +200,123 @@ test("message length limit is applied to the raw payload rather than the wrapper
     /message exceeds 65536 characters/,
   );
   assert.equal(recipient.calls.steer.length, 1);
+});
+
+test("relay_list exposes cwd, caller identity, status, and compact idle duration", async () => {
+  const now = Date.UTC(2026, 7, 28, 12, 0, 0);
+  const aliases = new Map([
+    [FROM_ID, "9"],
+    [TO_ID, "2"],
+  ]);
+  const { relay, sender } = fixture({
+    aliases,
+    now,
+    senderOptions: {
+      cwd: "/home/qqp/projects/qq-relay",
+      createdAt: now - (2 * 60 * 60 * 1000),
+      events: [
+        { type: "turn/end", time: now - (5 * 60 * 1000) },
+        { type: "older/event", time: now - (30 * 60 * 1000) },
+      ],
+    },
+    recipientStatus: "thinking",
+    recipientOptions: {
+      cwd: "/home/qqp/projects/qq-core",
+      createdAt: now - (24 * 60 * 60 * 1000),
+      events: [{ type: "step/start", time: now - (3 * 60 * 1000) }],
+    },
+  });
+  relay.hang(FROM_ID, "workflows:architect");
+  relay.hang(TO_ID, "workflows:implementer");
+  const tool = buildRelayTools(relay).find(({ name }) => name === "relay_list");
+  assert.match(tool.description, /session UUID \(the relay_send handle\)/);
+  assert.match(tool.description, /alias \(the operator handle, never a send handle\)/);
+  assert.match(tool.description, /cwd, self, status .* idle_for/);
+
+  const result = await tool.execute({}, { agent: sender });
+  const filtered = await tool.execute({ filter: "workflows:architect" }, { agent: sender });
+  assert.deepEqual(filtered.rows.map((row) => row.session), [FROM_ID]);
+  assert.equal(filtered.rows[0].self, true);
+
+  assert.deepEqual(result, {
+    status: "ok",
+    rows: [
+      {
+        alias: "2",
+        session: TO_ID,
+        status: "thinking-or-tool",
+        labels: ["workflows:implementer"],
+        cwd: "/home/qqp/projects/qq-core",
+        self: false,
+        idle_for: "",
+      },
+      {
+        alias: "9",
+        session: FROM_ID,
+        status: "idle",
+        labels: ["workflows:architect"],
+        cwd: "/home/qqp/projects/qq-relay",
+        self: true,
+        idle_for: "5m",
+      },
+    ],
+  });
+
+  const rendered = tool.output.render({}, result)[0].text;
+  assert.equal(rendered, `live sessions:
+${TO_ID}  alias 2  thinking-or-tool  /home/qqp/projects/qq-core  workflows:implementer
+${FROM_ID}  alias 9  idle 5m  /home/qqp/projects/qq-relay  self  workflows:architect`);
+  assert.equal(rendered.includes("(ephemeral)"), false);
+  assert.equal(rendered.includes("session session-"), false);
+});
+
+test("relay_list marks no row self without a listing caller and falls back to header creation time", () => {
+  const now = Date.UTC(2026, 7, 28, 12, 0, 0);
+  const aliases = new Map([
+    [FROM_ID, "9"],
+    [TO_ID, "2"],
+  ]);
+  const { relay } = fixture({
+    aliases,
+    now,
+    senderOptions: {
+      cwd: 42,
+      createdAt: now - (48 * 60 * 60 * 1000),
+    },
+    recipientOptions: {
+      createdAt: now - (5 * 1000),
+    },
+  });
+
+  const rows = relay.list();
+
+  assert.equal(rows.every((row) => row.self === false), true);
+  assert.equal(rows.find((row) => row.session === FROM_ID).cwd, "");
+  assert.equal(rows.find((row) => row.session === FROM_ID).idle_for, "2d");
+  assert.equal(rows.find((row) => row.session === TO_ID).idle_for, "5s");
+
+  const tool = buildRelayTools(relay).find(({ name }) => name === "relay_list");
+  const rendered = tool.output.render({}, { status: "ok", rows: [rows.find((row) => row.session === FROM_ID)] })[0].text;
+  assert.match(rendered, /  idle 2d  cwd —$/);
+});
+
+test("relay_list still excludes projects while relay_send rejects operator aliases", async () => {
+  const aliases = new Map([
+    [FROM_ID, "9"],
+    [TO_ID, "projects"],
+  ]);
+  const { relay, sender } = fixture({ aliases });
+  const tools = buildRelayTools(relay);
+  const list = tools.find(({ name }) => name === "relay_list");
+  const send = tools.find(({ name }) => name === "relay_send");
+
+  const listed = await list.execute({}, { agent: sender });
+  const refused = await send.execute({ to: "9", message: "do not route aliases" }, { agent: sender });
+
+  assert.deepEqual(listed.rows.map((row) => row.session), [FROM_ID]);
+  assert.equal(relay.resolve("projects"), TO_ID, "internal alias lookup remains available");
+  assert.equal(listed.rows[0].alias, "9");
+  assert.equal(listed.rows[0].self, true);
+  assert.equal(refused.status, "refused");
+  assert.match(refused.reason, /aliases .* not accepted/);
 });
