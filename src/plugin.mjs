@@ -2,8 +2,8 @@
 //
 // Loading this plugin is how a DSH host gets in-process messaging. Loading qq
 // does not imply relay, and this package imports nothing from qq or from the
-// old Pi agent-messages bag. Live session numbers live on qq; this plugin
-// consumes them through ctx.get("qq", false) / ctx.get("qq-aliases", false).
+// old Pi agent-messages bag. Live session numbers live on qq-core; this plugin
+// consumes them through ctx.get("qq-core", false) / ctx.get("qq-core-aliases", false).
 
 import { createRelayService } from "./relay.mjs";
 import { buildRelayTools } from "./tools.mjs";

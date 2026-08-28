@@ -65,7 +65,7 @@ function fixture({
     ["sessions", { flush: async () => {} }],
   ]);
   if (aliases !== undefined) {
-    services.set("qq", {
+    services.set("qq-core", {
       alias: (sessionId) => aliases.get(sessionId),
     });
   }

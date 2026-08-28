@@ -129,10 +129,10 @@ export function createRelayService(ctx, config = {}) {
   });
   const ledger = [];
 
-  // Lazy so plugin ordering cannot starve the book: relay consumes qq's
+  // Lazy so plugin ordering cannot starve the book: relay consumes qq-core's
   // aliases, it does not own them.
   function aliases() {
-    return ctx.get("qq", false) ?? ctx.get("qq-aliases", false);
+    return ctx.get("qq-core", false) ?? ctx.get("qq-core-aliases", false);
   }
 
   function aliasFor(sessionId) {
