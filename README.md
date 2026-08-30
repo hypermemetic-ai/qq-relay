@@ -1,16 +1,30 @@
 # `@hypermemetic-ai/qq-relay`
 
-The relay is the in-process Cordis mailbox. This repository is the only DSH
-relay generation and binds under the normal `qq-relay` name when present beside
-`qq-core`. There is no daemon, Unix socket journal, install root, polling queue,
-or second relay product.
+Private ES module package providing an in-process Cordis session mailbox for the core DSH host.
 
-The durable recipient identity is the full DSH `session-<UUID>`. Display aliases
-are informational and rejected as send targets. `relay_list` lists live
-recipients; `relay_send` delivers default or urgent messages through the live
-Agent inbox; `relay_status` reports the in-process delivery record. DSH session
-persistence owns durable transcript events.
+## Run the established checks
 
-Plugins may hang opaque namespaced labels on live sessions. Relay displays and
-filters labels but does not interpret them. All routes, tools, labels, and
-listeners are disposed with the plugin fiber.
+```sh
+npm test
+```
+
+The test script first syntax-checks [`src/plugin.mjs`](src/plugin.mjs), then runs the Node.js test runner. The package declares no start or other run script; it exposes modules for a host to consume.
+
+## Repository map
+
+| Boundary | Start here | Verification / contract |
+| --- | --- | --- |
+| Default package entry | [`src/plugin.mjs`](src/plugin.mjs) | Main module and `.` export in [`package.json`](package.json) |
+| `./relay` export | [`src/relay.mjs`](src/relay.mjs) | [`test/relay.test.mjs`](test/relay.test.mjs) |
+| `./labels` export | [`src/labels.mjs`](src/labels.mjs) | Run the full test command |
+| `./tools` export | [`src/tools.mjs`](src/tools.mjs) | Run the full test command |
+| Package exports and test command | [`package.json`](package.json) | `npm test` |
+
+The relay and tools modules have the broadest internal relative-import fan-in, and the relay is the most frequently changed source file in the available history. Begin there when tracing shared behavior, but use the explicit export map in [`package.json`](package.json) as the public package boundary.
+
+## Change routing
+
+- For relay behavior, change [`src/relay.mjs`](src/relay.mjs) and cover it in [`test/relay.test.mjs`](test/relay.test.mjs).
+- For host integration or the default export, begin with [`src/plugin.mjs`](src/plugin.mjs).
+- For public entry points, package metadata, or the test lifecycle, update [`package.json`](package.json); the package uses `"type": "module"` and explicitly enumerates its exports.
+- No dedicated tracked test files exist for labels, tools, or plugin changes, so run the complete `npm test` command after changes in those areas.
