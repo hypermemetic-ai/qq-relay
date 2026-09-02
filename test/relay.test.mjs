@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { createRelayService } from "../src/relay.mjs";
+import { createRelayService, isChildAgent, isGenericRelayPeer } from "../src/relay.mjs";
 import { buildRelayTools } from "../src/tools.mjs";
+import { apply as applyRelayPlugin } from "../src/plugin.mjs";
 
 const FROM_ID = "session-11111111-1111-4111-8111-111111111111";
 const TO_ID = "session-22222222-2222-4222-8222-222222222222";
+const CHILD_ID = "session-33333333-3333-4333-8333-333333333333";
+const FOREIGN_CHILD_ID = "session-44444444-4444-4444-8444-444444444444";
 const MAX_MESSAGE_LENGTH = 65_536;
 
 function fakeAgent(id, {
@@ -13,6 +16,11 @@ function fakeAgent(id, {
   cwd,
   createdAt,
   events = [],
+  origin,
+  parentSession,
+  parentId,
+  parent,
+  parent_session,
 } = {}) {
   const calls = {
     cancel: [],
@@ -28,6 +36,11 @@ function fakeAgent(id, {
       header: {
         ...(cwd !== undefined ? { cwd } : {}),
         ...(createdAt !== undefined ? { createdAt } : {}),
+        ...(origin !== undefined ? { origin } : {}),
+        ...(parentSession !== undefined ? { parentSession } : {}),
+        ...(parentId !== undefined ? { parentId } : {}),
+        ...(parent !== undefined ? { parent } : {}),
+        ...(parent_session !== undefined ? { parent_session } : {}),
       },
     },
     status,
@@ -36,9 +49,11 @@ function fakeAgent(id, {
     },
     followup(message) {
       calls.followup.push(message);
+      this.inbox.nextTurn.push(message);
     },
     steer(message) {
       calls.steer.push(message);
+      this.inbox.nextStep.push(message);
     },
   };
 }
@@ -49,6 +64,7 @@ function fixture({
   recipientOptions = {},
   recipientStatus = "idle",
   senderOptions = {},
+  extraAgents = [],
 } = {}) {
   const sender = fakeAgent(FROM_ID, senderOptions);
   const recipient = fakeAgent(TO_ID, { status: recipientStatus, ...recipientOptions });
@@ -56,6 +72,7 @@ function fixture({
     [FROM_ID, sender],
     [TO_ID, recipient],
   ]);
+  for (const agent of extraAgents) live.set(agent.session.id, agent);
   const agents = {
     get: (sessionId) => live.get(sessionId),
     list: () => [...live.values()],
@@ -73,6 +90,9 @@ function fixture({
     get: (name) => services.get(name),
   };
   return {
+    agents,
+    ctx,
+    live,
     recipient,
     relay: createRelayService(ctx, now === undefined ? {} : { now: () => now }),
     sender,
@@ -82,6 +102,18 @@ function fixture({
 async function relaySend(relay, sender, args) {
   const tool = buildRelayTools(relay).find(({ name }) => name === "relay_send");
   assert.ok(tool, "relay_send tool is registered");
+  return tool.execute(args, { agent: sender });
+}
+
+async function relayList(relay, sender, args = {}) {
+  const tool = buildRelayTools(relay).find(({ name }) => name === "relay_list");
+  assert.ok(tool, "relay_list tool is registered");
+  return tool.execute(args, { agent: sender });
+}
+
+async function relayStatus(relay, sender, args) {
+  const tool = buildRelayTools(relay).find(({ name }) => name === "relay_status");
+  assert.ok(tool, "relay_status tool is registered");
   return tool.execute(args, { agent: sender });
 }
 
@@ -319,4 +351,192 @@ test("relay_list still excludes projects while relay_send rejects operator alias
   assert.equal(listed.rows[0].self, true);
   assert.equal(refused.status, "refused");
   assert.match(refused.reason, /aliases .* not accepted/);
+});
+
+test("generic relay allows architect-to-architect send and lists both chairs", async () => {
+  const aliases = new Map([
+    [FROM_ID, "1"],
+    [TO_ID, "2"],
+  ]);
+  const { relay, sender, recipient } = fixture({ aliases });
+
+  const listed = await relayList(relay, sender);
+  assert.deepEqual(listed.rows.map((row) => row.session).sort(), [FROM_ID, TO_ID].sort());
+  const receipt = await relaySend(relay, sender, { to: TO_ID, message: "coordinate" });
+  assert.equal(receipt.status, "sent");
+  assert.equal(recipient.calls.steer.length, 1);
+});
+
+test("generic relay hides children from the directory and refuses architect-to-child send", async () => {
+  const ownChild = fakeAgent(CHILD_ID, { origin: "subagent", parentSession: FROM_ID });
+  const foreignChild = fakeAgent(FOREIGN_CHILD_ID, { origin: "subagent", parentSession: TO_ID });
+  const aliases = new Map([
+    [FROM_ID, "1"],
+    [TO_ID, "2"],
+    [CHILD_ID, "3"],
+    [FOREIGN_CHILD_ID, "4"],
+  ]);
+  const { relay, sender } = fixture({ aliases, extraAgents: [ownChild, foreignChild] });
+
+  const listed = await relayList(relay, sender);
+  assert.deepEqual(listed.rows.map((row) => row.session).sort(), [FROM_ID, TO_ID].sort());
+  assert.equal(listed.rows.some((row) => row.session === CHILD_ID), false);
+  assert.equal(listed.rows.some((row) => row.session === FOREIGN_CHILD_ID), false);
+
+  const own = await relaySend(relay, sender, { to: CHILD_ID, message: "use workflow_send" });
+  assert.equal(own.status, "refused");
+  assert.match(own.reason, /workflow_send/);
+  assert.equal(ownChild.calls.steer.length, 0);
+
+  const foreign = await relaySend(relay, sender, { to: FOREIGN_CHILD_ID, message: "no foreign child" });
+  assert.equal(foreign.status, "refused");
+  assert.match(foreign.reason, /not generic relay recipients/);
+  assert.equal(foreignChild.calls.steer.length, 0);
+});
+
+test("internal send still delivers parent-to-child and child-to-parent completion", async () => {
+  const child = fakeAgent(CHILD_ID, { origin: "subagent", parentSession: FROM_ID });
+  const { relay, sender } = fixture({ extraAgents: [child] });
+
+  const parentToChild = await relay.send({
+    fromId: FROM_ID,
+    to: CHILD_ID,
+    message: "workflow_send body",
+  });
+  assert.equal(parentToChild.status, "sent");
+  assert.equal(child.calls.steer.length, 1);
+
+  const completion = await relay.send({
+    fromId: CHILD_ID,
+    to: FROM_ID,
+    message: "automatic completion report",
+    messageId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  });
+  assert.equal(completion.status, "sent");
+  assert.equal(sender.calls.steer.length, 1);
+
+  const again = await relay.send({
+    fromId: CHILD_ID,
+    to: FROM_ID,
+    message: "automatic completion report",
+    messageId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  });
+  assert.equal(again.status, "sent");
+  assert.equal(again.message_id, completion.message_id);
+  assert.equal(sender.calls.steer.length, 1, "duplicate completion envelope is idempotent");
+});
+
+test("child-form generic tools are execution-denied even if a scope-local copy leaks", async () => {
+  const child = fakeAgent(CHILD_ID, { origin: "subagent", parentSession: FROM_ID });
+  const { relay, sender } = fixture({ extraAgents: [child] });
+
+  const listed = await relayList(relay, child);
+  assert.equal(listed.status, "refused");
+  assert.match(listed.reason, /delegated children cannot use generic relay/);
+
+  const sent = await relaySend(relay, child, { to: FROM_ID, message: "child raw relay" });
+  assert.equal(sent.status, "refused");
+  assert.match(sent.reason, /delegated children cannot use generic relay/);
+  assert.equal(sender.calls.steer.length, 0);
+
+  const status = await relayStatus(relay, child, { message_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" });
+  assert.equal(status.status, "refused");
+  assert.match(status.reason, /delegated children cannot use generic relay/);
+});
+
+test("parentId header variants and origin each classify as children", () => {
+  assert.equal(isChildAgent(fakeAgent(CHILD_ID)), false);
+  assert.equal(isChildAgent(fakeAgent(CHILD_ID, { origin: "subagent" })), true);
+  assert.equal(isChildAgent(fakeAgent(CHILD_ID, { parentSession: FROM_ID })), true);
+  assert.equal(isChildAgent(fakeAgent(CHILD_ID, { parentId: FROM_ID })), true);
+  assert.equal(isChildAgent(fakeAgent(CHILD_ID, { parent: FROM_ID })), true);
+  assert.equal(isChildAgent(fakeAgent(CHILD_ID, { parent_session: FROM_ID })), true);
+  assert.equal(isGenericRelayPeer(fakeAgent(FROM_ID)), true);
+  assert.equal(isGenericRelayPeer(fakeAgent(CHILD_ID, { origin: "subagent" })), false);
+  assert.equal(isGenericRelayPeer(fakeAgent(TO_ID), { alias: "projects" }), false);
+});
+
+test("projects-chair generic send to an architect remains available and still cannot address children", async () => {
+  const aliases = new Map([
+    [FROM_ID, "projects"],
+    [TO_ID, "2"],
+  ]);
+  const child = fakeAgent(CHILD_ID, { origin: "subagent", parentSession: TO_ID });
+  const { relay, sender, recipient } = fixture({ aliases, extraAgents: [child] });
+
+  const listed = await relayList(relay, sender);
+  assert.deepEqual(listed.rows.map((row) => row.session), [TO_ID]);
+
+  const toArchitect = await relaySend(relay, sender, { to: TO_ID, message: "projects coordination" });
+  assert.equal(toArchitect.status, "sent");
+  assert.equal(recipient.calls.steer.length, 1);
+
+  const toChild = await relaySend(relay, sender, { to: CHILD_ID, message: "projects cannot raw-relay children" });
+  assert.equal(toChild.status, "refused");
+  assert.match(toChild.reason, /workflow_send/);
+  assert.equal(child.calls.steer.length, 0);
+});
+
+test("plugin skips child-scope tool registration while still providing the mailbox", () => {
+  const child = fakeAgent(CHILD_ID, { origin: "subagent", parentSession: FROM_ID });
+  const registered = [];
+  const childTools = {
+    register(tool) {
+      registered.push(`child:${tool.name}`);
+      return () => {};
+    },
+  };
+  const hostTools = {
+    register(tool) {
+      registered.push(`host:${tool.name}`);
+      return () => {};
+    },
+  };
+  const { ctx } = fixture({ extraAgents: [child] });
+  const childCtx = {
+    agent: child,
+    get(name) {
+      if (name === "tools") return childTools;
+      return ctx.get(name);
+    },
+    effect(callback) {
+      return callback();
+    },
+  };
+  const hostCtx = {
+    get(name, optional) {
+      if (name === "tools") return hostTools;
+      return ctx.get(name, optional);
+    },
+    provide() {},
+    inject(_deps, callback) {
+      callback(hostCtx);
+      callback(childCtx);
+    },
+    effect(callback) {
+      return callback();
+    },
+  };
+  applyRelayPlugin(hostCtx);
+  assert.deepEqual(registered, ["host:relay_list", "host:relay_send", "host:relay_status"]);
+});
+
+test("directory stays consistent when a child carries workflow labels, and disposed children fail closed", async () => {
+  const child = fakeAgent(CHILD_ID, { origin: "subagent", parentSession: FROM_ID });
+  const { live, relay, sender } = fixture({ extraAgents: [child] });
+  relay.hang(CHILD_ID, "workflows:implementer");
+  relay.hang(FROM_ID, "workflows:architect");
+
+  const labeled = await relayList(relay, sender, { filter: "workflows" });
+  assert.deepEqual(labeled.rows.map((row) => row.session), [FROM_ID]);
+  assert.equal(labeled.rows[0].labels.includes("workflows:architect"), true);
+
+  live.delete(CHILD_ID);
+  await assert.rejects(
+    relay.send({ fromId: FROM_ID, to: CHILD_ID, message: "stale child" }),
+    /no live session matches/,
+  );
+  const genericStale = await relaySend(relay, sender, { to: CHILD_ID, message: "stale child" });
+  assert.equal(genericStale.status, "refused");
+  assert.match(genericStale.reason, /no live session matches/);
 });

@@ -1,10 +1,18 @@
 // In-process relay service for the qq-relay Cordis plugin.
 //
-// Locked contract (operator, T-66):
+// Locked contract (operator, T-66, workflow-family messaging):
 // - The mailbox is in this process. No daemon, socket, presence files, install
 //   root, or second database in the v1 land.
 // - Live sessions only: a session that is just a file on disk is not a
-//   recipient. Anyone loaded may send.
+//   recipient.
+// - Model-facing generic relay (relay_list / relay_send / relay_status) is the
+//   architect↔architect coordination channel, plus the already-settled
+//   projects-chair coordination. Child sessions are not generic peers: they are
+//   omitted from the directory and refused as generic recipients. Own-child
+//   messaging goes through workflow_send; foreign-child messaging is denied.
+// - Internal send() remains topology-capable so workflow-owned parent→child
+//   steer and automatic child→parent completion delivery keep working. Pass
+//   generic:true only from the model-facing tools.
 // - Delivery means the message is routed into the recipient's live DSH inbox;
 //   DSH session persistence owns the durable log entry.
 // - default = steer (next tool/step boundary, wakes idle). urgent = halt then
@@ -23,7 +31,39 @@ const MAX_MESSAGE_LENGTH = 65_536;
 const DELIVERIES = new Set(["default", "urgent"]);
 const LEDGER_CAP = 256;
 
+/** Durable child marker shared with qq-core / qq-workflows session headers. */
+export const CHILD_ORIGIN = "subagent";
+
 export class RelayError extends Error {}
+
+function headerOf(agentOrSession) {
+  return agentOrSession?.session?.header ?? agentOrSession?.header ?? {};
+}
+
+/** Authoritative owning parent UUID from a live agent or session header. */
+export function parentIdOf(agentOrSession) {
+  const header = headerOf(agentOrSession);
+  const parent = header.parentSession ?? header.parentId ?? header.parent ?? header.parent_session;
+  return SESSION_ID.test(String(parent ?? "")) ? String(parent) : "";
+}
+
+/**
+ * Delegated workflow children are topology-visible from the session header.
+ * Either origin=subagent or a durable parent session id is enough: fail closed
+ * rather than treating an adopted child as a generic relay peer.
+ */
+export function isChildAgent(agentOrSession) {
+  const header = headerOf(agentOrSession);
+  if (header.origin === CHILD_ORIGIN) return true;
+  return parentIdOf(agentOrSession).length > 0;
+}
+
+/** Live non-child, non-projects sessions are the generic relay domain. */
+export function isGenericRelayPeer(agent, { alias } = {}) {
+  if (!SESSION_ID.test(agent?.session?.id ?? "")) return false;
+  if (alias === "projects") return false;
+  return !isChildAgent(agent);
+}
 
 function freezeDeep(value) {
   if (value && typeof value === "object" && !Object.isFrozen(value)) {
@@ -196,7 +236,7 @@ export function createRelayService(ctx, config = {}) {
     return true;
   }
 
-  async function send({ fromId, to, message, delivery = "default", messageId }) {
+  async function send({ fromId, to, message, delivery = "default", messageId, generic = false }) {
     if (!SESSION_ID.test(fromId)) {
       throw new RelayError("send requires a live session-<UUID> sender");
     }
@@ -226,6 +266,14 @@ export function createRelayService(ctx, config = {}) {
     }
     if (recipient.session.id === fromId) {
       throw new RelayError("send cannot address the sender's own session");
+    }
+    if (generic === true) {
+      if (isChildAgent(sender)) {
+        throw new RelayError("delegated children cannot use generic relay");
+      }
+      if (isChildAgent(recipient)) {
+        throw new RelayError("child sessions are not generic relay recipients; use workflow_send");
+      }
     }
 
     const fromAlias = aliasFor(fromId);
@@ -288,7 +336,7 @@ export function createRelayService(ctx, config = {}) {
     const now = config.now?.() ?? Date.now();
     const rows = liveAgents()
       .filter((agent) => {
-        if (aliasFor(agent.session.id) === "projects") return false;
+        if (!isGenericRelayPeer(agent, { alias: aliasFor(agent.session.id) })) return false;
         const bag = labels.labelsFor(agent.session.id);
         return labels.matches(bag, filter);
       })
